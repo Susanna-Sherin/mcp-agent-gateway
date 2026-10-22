@@ -69,3 +69,6 @@ $RECYCLE.BIN/
 logs/
 tmp/
 scratch/
+
+# Simulated test outbox
+data/synthetic/outbox/*.json

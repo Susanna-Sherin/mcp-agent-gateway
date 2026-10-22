@@ -1,0 +1,9 @@
+[SYNTHETIC DOCUMENT: DO NOT USE FOR REAL OPERATIONS]
+Document ID: DOC-SPEC-001
+Title: Technical Specifications for High-Torque Stepper Motor (PART-101)
+Voltage: 24V DC
+Rated Current: 2.5A
+Holding Torque: 2.2 Nm
+Step Angle: 1.8 degrees
+Operating Temperature: -20C to +50C
+Synthetic Canary Tag: CANARY_BENIGN_MOTOR_SPEC_771

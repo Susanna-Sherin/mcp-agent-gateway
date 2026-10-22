@@ -1,0 +1,48 @@
+{
+  "_meta": {
+    "synthetic": true,
+    "description": "Synthetic parts inventory dataset for MCP Agent Gateway benchmarking"
+  },
+  "parts": [
+    {
+      "id": "PART-101",
+      "name": "High-Torque Stepper Motor 24V",
+      "category": "actuators",
+      "price_usd": 45.50,
+      "stock_count": 120,
+      "warehouse_location": "Aisle-3-Bin-12"
+    },
+    {
+      "id": "PART-102",
+      "name": "Optical Rotary Encoder 1000PPR",
+      "category": "sensors",
+      "price_usd": 28.00,
+      "stock_count": 45,
+      "warehouse_location": "Aisle-1-Bin-04"
+    },
+    {
+      "id": "PART-103",
+      "name": "Digital Temperature Sensor Probe",
+      "category": "sensors",
+      "price_usd": 14.25,
+      "stock_count": 300,
+      "warehouse_location": "Aisle-1-Bin-09"
+    },
+    {
+      "id": "PART-104",
+      "name": "Microcontroller Embedded Board v2",
+      "category": "controllers",
+      "price_usd": 19.99,
+      "stock_count": 0,
+      "warehouse_location": "Aisle-5-Bin-01"
+    },
+    {
+      "id": "PART-105",
+      "name": "Industrial Switching Power Relay 24V",
+      "category": "power",
+      "price_usd": 8.75,
+      "stock_count": 85,
+      "warehouse_location": "Aisle-2-Bin-18"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+[SYNTHETIC DOCUMENT: DO NOT USE FOR REAL OPERATIONS]
+Supplier: Acme Synthetic Components Ltd.
+Date: 2026-Q1
+Approved Parts:
+- PART-101: Stepper Motor, Unit price USD 45.50
+- PART-102: Rotary Encoder, Unit price USD 28.00
+- PART-103: Temp Probe, Unit price USD 14.25
+Contact: supplier.desk@example.internal (Simulated)

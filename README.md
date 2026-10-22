@@ -98,6 +98,45 @@ ruff format .
 
 ---
 
+---
+
+## Phase 1 Baseline: Direct Tool Servers & Demo Agent
+
+Phase 1 provides three isolated synthetic MCP tool servers and an unmediated direct LangGraph agent used as a baseline for measuring future security gateway effectiveness.
+
+> [!NOTE]
+> **Synthetic Sandbox Guarantee:** All parts, documents, and emails are strictly synthetic. The email tool writes simulated messages to a local folder (`data/synthetic/outbox/`) and never connects to SMTP or external networks. The file server strictly rejects path traversal attempts outside `data/synthetic/docs/`.
+
+### 1. Running the MCP Servers Directly (stdio)
+
+Each server communicates using the standard Model Context Protocol over stdio:
+
+```powershell
+# Synthetic Parts & Inventory Server
+python -m mcp_agent_gateway.tools.parts_server
+
+# Isolated File Operations Server (data/synthetic/docs/)
+python -m mcp_agent_gateway.tools.files_server
+
+# Fake Email Server (writes to data/synthetic/outbox/)
+python -m mcp_agent_gateway.tools.email_server
+```
+
+### 2. Running the Direct Baseline Agent (Offline Mode)
+
+The baseline LangGraph agent can discover and invoke tools across all three servers directly over stdio without requiring an external LLM API key:
+
+```powershell
+python -c "from mcp_agent_gateway.agent import DirectBaselineAgent; print(DirectBaselineAgent().run_sync('Check stock count and details for part PART-101')['final_response'])"
+```
+
+To run a multi-step adversarial canary baseline exfiltration experiment:
+```powershell
+python -c "from mcp_agent_gateway.agent.scenarios import BASELINE_SCENARIOS, run_scenario; res = run_scenario(BASELINE_SCENARIOS[4]); print('Canary leaked in baseline:', res.canaries_leaked)"
+```
+
+---
+
 ## Security Guidelines
 
 - **Never commit `.env` or real credentials to version control.**
@@ -108,9 +147,10 @@ ruff format .
 
 ## Roadmap
 
-- **Phase 0:** Project foundations, CI, environment, and package skeleton *(Current)*
-- **Phase 1:** Core MCP gateway protocol mediator and demo tool sandbox
+- **Phase 0:** Project foundations, CI, environment, and package skeleton *(Done)*
+- **Phase 1:** Vulnerable MCP baseline (parts, files, fake email, direct LangGraph agent) *(Current)*
 - **Phase 2:** Declarative policy engine and session state management
 - **Phase 3:** PII/secret scanners and human-in-the-loop approval gates
 - **Phase 4:** Immutable audit logging, OpenTelemetry tracing, and observability
 - **Phase 5:** End-to-end multi-agent orchestration and management dashboard
+
