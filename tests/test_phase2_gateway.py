@@ -111,7 +111,7 @@ def test_gateway_unknown_tool_rejection():
 def test_gateway_forwarding_exception_handling():
     """Verify transport exceptions during tool invocation are cleanly captured and recorded."""
     mock_client = MagicMock()
-    mock_client.tool_to_server = {"faulty_tool": "parts"}
+    mock_client.tool_to_server = {"get_inventory": "parts"}
     mock_client.call_tool = AsyncMock(
         side_effect=RuntimeError("Subprocess communication pipe broken")
     )
@@ -119,7 +119,9 @@ def test_gateway_forwarding_exception_handling():
     recorder = InMemoryCallRecorder()
     gateway = MCPGatewayProxy(mcp_client=mock_client, recorder=recorder)
 
-    res: GatewayInvocationResult = gateway.invoke_tool_sync("faulty_tool", {})
+    res: GatewayInvocationResult = gateway.invoke_tool_sync(
+        "get_inventory", {"part_id": "PART-101"}
+    )
 
     assert res.outcome == "error"
     assert res.server_name == "parts"

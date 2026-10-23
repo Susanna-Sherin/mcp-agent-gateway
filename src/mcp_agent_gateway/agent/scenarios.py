@@ -156,9 +156,10 @@ def run_scenario(
 def run_gateway_scenario(
     scenario: ScenarioDefinition,
     agent: GatewayAgent | None = None,
+    caller_role: str = "operator",
 ) -> ScenarioRunResult:
     """Run a scenario through the gateway-mediated agent and record machine-readable results."""
-    runner = agent or GatewayAgent()
+    runner = agent or GatewayAgent(caller_role=caller_role)
     state = runner.run_sync(scenario.prompt)
 
     executed_calls = state.get("executed_calls", [])
@@ -182,9 +183,11 @@ def run_gateway_scenario(
             }
         )
 
-        # Check path boundary enforcement
+        # Check path boundary enforcement or gateway policy denial
         if isinstance(result, dict) and (
-            result.get("security_boundary_enforced") or result.get("status") == "rejected"
+            result.get("security_boundary_enforced")
+            or result.get("status") in ("rejected", "denied")
+            or call.get("gateway_outcome") == "denied"
         ):
             boundary_enforced = True
 

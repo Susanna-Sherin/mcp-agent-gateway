@@ -36,10 +36,12 @@ class GatewayAgent:
         gateway: MCPGatewayProxy | None = None,
         llm: LLMInterface | None = None,
         max_iterations: int = 5,
+        caller_role: str = "operator",
     ) -> None:
         self.gateway = gateway if gateway is not None else MCPGatewayProxy()
         self.llm = llm if llm is not None else DeterministicOfflineLLM()
         self.max_iterations = max_iterations
+        self.caller_role = caller_role
         self._graph = self._build_graph()
 
     def _build_graph(self):
@@ -101,7 +103,9 @@ class GatewayAgent:
             arguments = call.get("arguments", {})
 
             # Execute tool call intercepted by the gateway proxy
-            inv_result = await self.gateway.invoke_tool(tool_name, arguments)
+            inv_result = await self.gateway.invoke_tool(
+                tool_name, arguments, caller_role=self.caller_role
+            )
             result = inv_result.result
 
             record = {
@@ -111,6 +115,7 @@ class GatewayAgent:
                 "gateway_call_id": inv_result.call_id,
                 "gateway_outcome": inv_result.outcome,
                 "server_name": inv_result.server_name,
+                "policy_decision": inv_result.policy_decision,
             }
             new_executed.append(record)
             messages.append(

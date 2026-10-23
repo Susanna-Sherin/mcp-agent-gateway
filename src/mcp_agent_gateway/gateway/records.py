@@ -17,10 +17,11 @@ class ToolCallRecord:
     server_name: str
     tool_name: str
     arguments: dict[str, Any]
-    outcome: str  # "success", "error", "unknown_tool"
+    outcome: str  # "success", "error", "unknown_tool", "denied"
     result: dict[str, Any] | None = None
     error_message: str | None = None
     duration_ms: float = 0.0
+    policy_decision: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

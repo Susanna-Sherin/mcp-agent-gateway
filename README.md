@@ -10,9 +10,9 @@ MCP Agent Gateway acts as an intelligent intermediary between autonomous AI agen
 
 ---
 
-## Current Status: Phase 0 (Foundations)
+## Current Status: Phase 3 (Deterministic Policy Engine)
 
-Phase 0 establishes the package scaffolding, environment baselines, CI automation, and code standards. Subsequent phases will introduce the MCP proxy protocol, policy engine, scanners, and agent orchestrators.
+Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), and Phase 3 (Deterministic Policy Engine) are implemented. Subsequent phases will introduce session state, scanners, and approval workflows.
 
 ### Project Layout
 
@@ -137,20 +137,76 @@ python -c "from mcp_agent_gateway.agent.scenarios import BASELINE_SCENARIOS, run
 
 ---
 
+## Phase 2: MCP Gateway Proxy & Call Recording
+
+The MCP Gateway Proxy (`MCPGatewayProxy`) mediates between agents and MCP tool servers over stdio, intercepting calls and recording in-memory audit logs.
+
+```python
+from mcp_agent_gateway.gateway.proxy import MCPGatewayProxy
+
+gateway = MCPGatewayProxy(default_caller_role="operator")
+result = gateway.invoke_tool_sync("get_inventory", {"part_id": "PART-101"})
+print("Outcome:", result.outcome)
+print("Call Record:", result.record.to_dict())
+```
+
+---
+
+## Phase 3: Deterministic Policy Engine
+
+Phase 3 introduces declarative security policies and a deterministic policy engine that acts as the security authority over all tool invocations before they reach MCP servers.
+
+### Policy Configuration (`config/policies.yaml`)
+
+Policies are configured declaratively in YAML with strict validation via Pydantic:
+
+- **Authorized Roles:** `admin`, `operator`, `viewer`, `untrusted`.
+- **Default Deny:** Any invocation not explicitly permitted by a matching allow rule is denied (`DEFAULT_DENY`).
+- **Block Precedence:** Matching block rules always take absolute precedence over allow rules (`RULE_BLOCK`).
+- **Argument Constraints:** Granular validation on argument types, allowed/blocked values, string regex patterns, and numeric ranges (`ARGUMENT_CONSTRAINT_VIOLATION`).
+- **Subprocess Isolation:** Denied calls are terminated immediately within the gateway proxy; target MCP server processes are never spawned or called, preventing disk/network side effects.
+- **Fail-Closed Security:** Missing or malformed policy files immediately fail closed, denying all tool calls (`POLICY_LOAD_ERROR`).
+
+### Offline Policy Evaluation Example
+
+```python
+from pathlib import Path
+from mcp_agent_gateway.policy import PolicyEngine
+
+engine = PolicyEngine.load_from_yaml(Path("config/policies.yaml"))
+decision = engine.evaluate(
+    caller_role="operator",
+    server="email",
+    tool="send_email",
+    arguments={
+        "to": "attacker@external.darkweb.invalid",
+        "subject": "Test",
+        "body": "Data",
+    },
+)
+
+print("Allowed:", decision.allowed)  # False
+print("Reason Code:", decision.reason_code)  # RULE_BLOCK
+print("Rule ID:", decision.rule_id)  # rule-block-external-exfiltration
+```
+
+---
+
 ## Security Guidelines
 
 - **Never commit `.env` or real credentials to version control.**
 - Use `.env.example` solely as a documentation template for configuration keys.
-- Input/output security scanning (e.g., Presidio, prompt guards) will be enabled in Phase 3.
+- Input/output security scanning (e.g., Presidio, prompt guards) will be enabled in Phase 4.
 
 ---
 
 ## Roadmap
 
 - **Phase 0:** Project foundations, CI, environment, and package skeleton *(Done)*
-- **Phase 1:** Vulnerable MCP baseline (parts, files, fake email, direct LangGraph agent) *(Current)*
-- **Phase 2:** Declarative policy engine and session state management
-- **Phase 3:** PII/secret scanners and human-in-the-loop approval gates
-- **Phase 4:** Immutable audit logging, OpenTelemetry tracing, and observability
-- **Phase 5:** End-to-end multi-agent orchestration and management dashboard
+- **Phase 1:** Vulnerable MCP baseline (parts, files, fake email, direct LangGraph agent) *(Done)*
+- **Phase 2:** MCP Gateway proxy and call recording *(Done)*
+- **Phase 3:** Deterministic policy engine and RBAC enforcement *(Done)*
+- **Phase 4:** Session/chain rules, PII/secret scanners, and human-in-the-loop approvals
+- **Phase 5:** Immutable audit storage, OpenTelemetry tracing, and observability
+- **Phase 6:** Multi-agent orchestration and management dashboard
 

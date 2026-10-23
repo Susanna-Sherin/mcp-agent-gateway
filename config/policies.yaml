@@ -1,0 +1,123 @@
+# ==============================================================================
+# MCP Agent Gateway - Declarative Security Policies (Phase 3)
+# ==============================================================================
+version: "1.0"
+description: "Declarative security policies governing MCP tool access, roles, and argument constraints."
+default_action: "deny"
+
+# ------------------------------------------------------------------------------
+# 1. Authorized Caller Roles
+# ------------------------------------------------------------------------------
+roles:
+  admin:
+    description: "System administrator with comprehensive access across all tool servers."
+  operator:
+    description: "Warehouse operator with access to inventory, documents, and internal notifications."
+  viewer:
+    description: "Read-only inventory viewer role."
+  untrusted:
+    description: "Untrusted or unauthenticated agent role (default-denied all tool access)."
+
+# ------------------------------------------------------------------------------
+# 2. Declarative Security Rules (Block Rules Take Strict Precedence)
+# ------------------------------------------------------------------------------
+rules:
+  # --- Explicit Block Rules ---
+  - id: "rule-block-external-exfiltration"
+    description: "Block all simulated email transmissions destined for external or untrusted domains."
+    action: "block"
+    roles: ["*"]
+    server: "email"
+    tools: ["send_email"]
+    argument_constraints:
+      to:
+        type: "string"
+        blocked_patterns:
+          - ".*adversary.*"
+          - ".*untrusted.*"
+          - ".*external.*"
+
+  - id: "rule-block-confidential-canary-memo"
+    description: "Block access to confidential benchmark canary memorandum."
+    action: "block"
+    roles: ["*"]
+    server: "files"
+    tools: ["read_file"]
+    argument_constraints:
+      filename:
+        type: "string"
+        blocked_values:
+          - "internal_memo_canary.txt"
+          - "internal_memorandum.txt"
+
+  # --- Explicit Allow Rules for Operators & Admins ---
+  - id: "rule-allow-operator-search-parts"
+    description: "Allow operators and admins to search the synthetic parts catalog."
+    action: "allow"
+    roles: ["operator", "admin"]
+    server: "parts"
+    tools: ["search_parts"]
+    argument_constraints:
+      query:
+        type: "string"
+        max_length: 100
+      category:
+        type: "string"
+        allowed_values:
+          - "actuators"
+          - "sensors"
+          - "electronics"
+          - "fasteners"
+      limit:
+        type: "integer"
+        min_value: 1
+        max_value: 100
+
+  - id: "rule-allow-operator-get-inventory"
+    description: "Allow operators and admins to check stock for valid part IDs."
+    action: "allow"
+    roles: ["operator", "admin"]
+    server: "parts"
+    tools: ["get_inventory"]
+    argument_constraints:
+      part_id:
+        required: true
+        type: "string"
+        pattern: "^PART-[0-9]{3}$"
+
+  - id: "rule-allow-viewer-parts"
+    description: "Allow read-only viewers to search parts and inspect stock counts."
+    action: "allow"
+    roles: ["viewer"]
+    server: "parts"
+    tools: ["search_parts", "get_inventory"]
+
+  - id: "rule-allow-operator-list-files"
+    description: "Allow operators and admins to list files in the synthetic docs sandbox."
+    action: "allow"
+    roles: ["operator", "admin"]
+    server: "files"
+    tools: ["list_files"]
+
+  - id: "rule-allow-operator-read-docs"
+    description: "Allow operators and admins to read non-confidential technical documents."
+    action: "allow"
+    roles: ["operator", "admin"]
+    server: "files"
+    tools: ["read_file"]
+    argument_constraints:
+      filename:
+        required: true
+        type: "string"
+        pattern: "^[A-Za-z0-9_.-]+$"
+
+  - id: "rule-allow-operator-internal-email"
+    description: "Allow operators and admins to send notifications strictly within internal corporate domain."
+    action: "allow"
+    roles: ["operator", "admin"]
+    server: "email"
+    tools: ["send_email", "list_outbox"]
+    argument_constraints:
+      to:
+        type: "string"
+        pattern: "^[a-zA-Z0-9._%+-]+@(example\\.internal|internal\\.megacorp\\.local)$"
