@@ -10,6 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from mcp_agent_gateway.policy.models import (
+    ChainRule,
     PolicyConfig,
     PolicyDecision,
     PolicyRule,
@@ -38,6 +39,13 @@ class PolicyEngine:
     def is_loaded(self) -> bool:
         """Indicate whether a valid policy configuration is currently loaded."""
         return self.is_valid
+
+    @property
+    def chain_rules(self) -> list[ChainRule]:
+        """Return declared chain rules or empty list if no valid config is loaded."""
+        if self.config is not None:
+            return self.config.chain_rules
+        return []
 
     @classmethod
     def load_from_yaml(cls, path: Path | str, strict: bool = False) -> PolicyEngine:

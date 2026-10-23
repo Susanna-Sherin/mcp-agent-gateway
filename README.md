@@ -10,9 +10,9 @@ MCP Agent Gateway acts as an intelligent intermediary between autonomous AI agen
 
 ---
 
-## Current Status: Phase 3 (Deterministic Policy Engine)
+## Current Status: Phase 4 (Session State and Tool-Chain Rules)
 
-Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), and Phase 3 (Deterministic Policy Engine) are implemented. Subsequent phases will introduce session state, scanners, and approval workflows.
+Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), Phase 3 (Deterministic Policy Engine), and Phase 4 (Session State & Tool-Chain Rules) are implemented. Subsequent phases will introduce scanners, approval workflows, and persistent audit storage.
 
 ### Project Layout
 
@@ -192,11 +192,77 @@ print("Rule ID:", decision.rule_id)  # rule-block-external-exfiltration
 
 ---
 
+## Phase 4: Session State and Tool-Chain Rules
+
+Phase 4 introduces stateful, multi-step tool sequence governance through isolated session state and deterministic declarative chain rules.
+
+### 1. Session State Architecture (`mcp_agent_gateway.session`)
+
+- **Thread-Safe In-Memory Session Manager:** Manages isolated agent execution contexts synchronized via reentrant locking (`SessionManager`).
+- **Cryptographic Unpredictability:** Generates unpredictable, cryptographically random session IDs (`sess_<token>`) in trusted application code when not caller-supplied.
+- **Strict Role Binding:** Binds each session strictly to a single trusted caller role on creation. Re-access attempts with a conflicting role are immediately rejected (`SESSION_ROLE_MISMATCH`).
+- **Revocation Tombstones:** Deleted sessions are permanently tombstoned so deleted session IDs cannot be reused to resurrect clean, untainted sessions (`SESSION_STATE_ERROR`). Calling `clear()` purges active session state while deliberately preserving revocation tombstones by default (`preserve_revocations=True`).
+- **Prompt/Argument Spoofing Invariance:** Session identity and caller roles are never taken from LLM-generated output, tool arguments, or untrusted prompt text.
+- **Minimal Audit History:** Retains strictly minimal call metadata: `sequence_number`, `server_name`, `tool_name`, `outcome`, and `timestamp_utc`. Never stores raw tool arguments, outputs, document contents, email bodies, or confidential payloads in session memory.
+- **Session Isolation:** Histories, taints, and invocation counts are completely isolated per session with zero cross-session leakage.
+- **Atomic Monotonic Ordering & Per-Session Locking:** Calls within the same session are serialized atomically using per-session async locks scoped to the running event loop. This prevents race conditions against invocation limits or sensitive-read taints while allowing calls across distinct sessions to run concurrently without deadlocks.
+
+### 2. Declarative Chain Rules Schema (`config/policies.yaml`)
+
+Chain rules extend the YAML policy document under `chain_rules:` with strict Pydantic validation (`extra="forbid"`):
+
+| Rule Type | Description | Mandatory Schema Fields | Reason Code on Violation |
+| :--- | :--- | :--- | :--- |
+| `forbidden_transition` | Forbids invoking a target tool if the session carries an active taint. | `server`, `tools`, `forbidden_if_tainted` | `CHAIN_FORBIDDEN_TRANSITION` |
+| `prerequisite` | Requires prior successful execution (`outcome == "success"`) of a real registered prerequisite tool. | `server`, `tools`, `prerequisite_tool` | `CHAIN_PREREQUISITE_NOT_MET` |
+| `invocation_limit` | Restricts total forwarded tool invocations in a single session. | `server`, `tools`, `max_invocations` (>= 1) | `CHAIN_INVOCATION_LIMIT_EXCEEDED` |
+
+### 3. Invocation Evaluation Sequence
+
+`MCPGatewayProxy.invoke_tool` strictly enforces this 7-step sequence:
+
+```text
+1. Resolve and Validate Registered Tool
+   └── If unknown tool: record unknown_tool outcome, return immediately.
+2. Resolve or Create Trusted Session & Verify Bound Role
+   ├── Fail closed if session manager is missing or ID is revoked (SESSION_STATE_ERROR).
+   └── Reject if session is bound to a conflicting role (SESSION_ROLE_MISMATCH).
+[Per-Session Async Lock Acquired]
+3. Evaluate Phase 3 Static Policy
+   ├── Fail closed if policy engine is missing (POLICY_LOAD_ERROR).
+   └── Static policy denial takes strict precedence (RULE_BLOCK, DEFAULT_DENY, etc.).
+4. Evaluate Phase 4 Chain Rules
+   ├── Fail closed if chain engine is missing or errors (CHAIN_EVALUATION_ERROR).
+   └── Evaluate taints, prerequisites, and invocation limits before any MCP subprocess.
+5. Forward to MCP Client
+   └── Subprocess invocation occurs ONLY if all prior checks passed.
+6. Update Session State
+   ├── Record call outcome ("success", "error", "denied") in minimal history.
+   ├── Increment forwarded tool counts for successful/forwarded executions.
+   └── Apply security taints on explicit sensitive file read conditions.
+7. Record Audit Entry
+   └── Append ToolCallRecord with session_id, session_seq, and chain_decision.
+```
+
+### 4. Sensitive Read to Email Barrier & Taint Semantics
+
+- **Explicit Deterministic Taint:** Only reads meeting an explicit, deterministic sensitive-file condition (e.g. `internal_memo_canary.txt`, sensitive memo filenames, or containing benchmark canary token `CANARY_SYNTHETIC_ALPHA`) trigger `sensitive_file_read` taint.
+- **Ordinary Document Protection:** Ordinary non-sensitive technical document reads (`spec_motor_v1.txt`, `supplier_catalog.txt`) do NOT taint the session.
+- **Prerequisite Semantics:** Only prior calls with `outcome == "success"` satisfy prerequisites. Denied or failed calls cannot satisfy prerequisites.
+- **Invocation Counting Semantics:** Invocation limits govern forwarded calls (calls that reached Step 5). Denied calls do not consume invocation quotas.
+
+### 5. In-Memory State Limitations
+
+- **Process Lifetime Scope:** Session state is held in-memory and is transient; restarting the gateway process resets all active sessions and counts.
+- **Single-Node Deployment:** In-memory session tracking is designed for single gateway instances. Multi-instance distributed deployments require shared state backends (e.g., Redis).
+
+---
+
 ## Security Guidelines
 
 - **Never commit `.env` or real credentials to version control.**
 - Use `.env.example` solely as a documentation template for configuration keys.
-- Input/output security scanning (e.g., Presidio, prompt guards) will be enabled in Phase 4.
+- Input/output security scanning (e.g., Presidio, prompt guards) will be enabled in Phase 5.
 
 ---
 
@@ -206,7 +272,7 @@ print("Rule ID:", decision.rule_id)  # rule-block-external-exfiltration
 - **Phase 1:** Vulnerable MCP baseline (parts, files, fake email, direct LangGraph agent) *(Done)*
 - **Phase 2:** MCP Gateway proxy and call recording *(Done)*
 - **Phase 3:** Deterministic policy engine and RBAC enforcement *(Done)*
-- **Phase 4:** Session/chain rules, PII/secret scanners, and human-in-the-loop approvals
-- **Phase 5:** Immutable audit storage, OpenTelemetry tracing, and observability
-- **Phase 6:** Multi-agent orchestration and management dashboard
-
+- **Phase 4:** Session state, trusted role binding, and tool-chain rules *(Done)*
+- **Phase 5:** PII/secret scanners, prompt guards, and human-in-the-loop approvals
+- **Phase 6:** Immutable audit storage, OpenTelemetry tracing, and observability
+- **Phase 7:** Multi-agent orchestration and management dashboard

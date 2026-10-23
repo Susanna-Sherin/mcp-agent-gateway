@@ -122,6 +122,83 @@ class PolicyRule(BaseModel):
         return data
 
 
+class ChainRule(BaseModel):
+    """Declarative rule governing multi-step tool call sequences, taints, and invocation limits."""
+
+    model_config = {"extra": "forbid"}
+
+    id: str = Field(..., description="Unique alphanumeric identifier for the chain rule.")
+    description: str = Field(default="", description="Human-readable rationale for the chain rule.")
+    rule_type: Literal["forbidden_transition", "prerequisite", "invocation_limit"] = Field(
+        ..., description="Type of chain rule."
+    )
+    server: str = Field(..., description="Target server name, or '*'.")
+    tools: list[str] = Field(..., description="Target tool names governed by this rule, or ['*'].")
+    roles: list[str] = Field(
+        default_factory=lambda: ["*"],
+        description="Roles to which this rule applies (defaults to ['*']).",
+    )
+
+    # For 'forbidden_transition':
+    forbidden_if_tainted: list[str] = Field(
+        default_factory=list,
+        description="List of session taints that forbid this tool transition.",
+    )
+
+    # For 'prerequisite':
+    prerequisite_tool: str | None = Field(
+        default=None,
+        description="Real registered tool name that must have been successfully invoked prior.",
+    )
+    prerequisite_server: str | None = Field(
+        default=None,
+        description="Optional server name for the prerequisite tool.",
+    )
+
+    # For 'invocation_limit':
+    max_invocations: int | None = Field(
+        default=None,
+        description="Maximum permitted forwarded invocations of the tool in a single session.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, data: Any) -> Any:
+        """Allow rule_id as alias for id, and tool as alias for tools."""
+        if isinstance(data, dict):
+            new_data = dict(data)
+            if "rule_id" in new_data and "id" not in new_data:
+                new_data["id"] = new_data.pop("rule_id")
+            if "tool" in new_data and "tools" not in new_data:
+                tool_val = new_data.pop("tool")
+                new_data["tools"] = [tool_val] if isinstance(tool_val, str) else tool_val
+            return new_data
+        return data
+
+    @model_validator(mode="after")
+    def validate_rule_fields(self) -> ChainRule:
+        """Validate required fields based on rule_type."""
+        if self.rule_type == "forbidden_transition" and not self.forbidden_if_tainted:
+            raise ValueError(
+                f"Chain rule '{self.id}' of type 'forbidden_transition' "
+                f"must specify 'forbidden_if_tainted'."
+            )
+        if self.rule_type == "prerequisite" and (
+            not self.prerequisite_tool or not self.prerequisite_tool.strip()
+        ):
+            raise ValueError(
+                f"Chain rule '{self.id}' of type 'prerequisite' must specify 'prerequisite_tool'."
+            )
+        if self.rule_type == "invocation_limit" and (
+            self.max_invocations is None or self.max_invocations < 1
+        ):
+            raise ValueError(
+                f"Chain rule '{self.id}' of type 'invocation_limit' "
+                f"must specify 'max_invocations' >= 1."
+            )
+        return self
+
+
 class RoleDefinition(BaseModel):
     """Specification of an authorized caller role."""
 
@@ -149,6 +226,10 @@ class PolicyConfig(BaseModel):
         default_factory=list,
         description="Ordered security policy rules.",
     )
+    chain_rules: list[ChainRule] = Field(
+        default_factory=list,
+        description="Declarative session and tool-chain rules.",
+    )
 
     @model_validator(mode="after")
     def validate_rules_integrity(self) -> PolicyConfig:
@@ -167,6 +248,19 @@ class PolicyConfig(BaseModel):
                 if role != "*" and role not in declared_roles:
                     raise ValueError(
                         f"Rule '{rule.id}' references undeclared role '{role}'. "
+                        f"Declared roles are: {sorted(declared_roles)}"
+                    )
+
+        seen_chain_ids: set[str] = set()
+        for c_rule in self.chain_rules:
+            if c_rule.id in seen_ids or c_rule.id in seen_chain_ids:
+                raise ValueError(f"Duplicate rule ID found in chain rules: '{c_rule.id}'")
+            seen_chain_ids.add(c_rule.id)
+
+            for role in c_rule.roles:
+                if role != "*" and role not in declared_roles:
+                    raise ValueError(
+                        f"Chain rule '{c_rule.id}' references undeclared role '{role}'. "
                         f"Declared roles are: {sorted(declared_roles)}"
                     )
 

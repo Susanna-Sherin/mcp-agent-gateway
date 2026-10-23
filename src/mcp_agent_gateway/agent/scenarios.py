@@ -157,9 +157,10 @@ def run_gateway_scenario(
     scenario: ScenarioDefinition,
     agent: GatewayAgent | None = None,
     caller_role: str = "operator",
+    session_id: str | None = None,
 ) -> ScenarioRunResult:
     """Run a scenario through the gateway-mediated agent and record machine-readable results."""
-    runner = agent or GatewayAgent(caller_role=caller_role)
+    runner = agent or GatewayAgent(caller_role=caller_role, session_id=session_id)
     state = runner.run_sync(scenario.prompt)
 
     executed_calls = state.get("executed_calls", [])
@@ -180,6 +181,7 @@ def run_gateway_scenario(
                 "status": result.get("status") if isinstance(result, dict) else "ok",
                 "gateway_call_id": call.get("gateway_call_id"),
                 "gateway_outcome": call.get("gateway_outcome"),
+                "session_id": call.get("session_id"),
             }
         )
 

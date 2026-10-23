@@ -121,3 +121,35 @@ rules:
       to:
         type: "string"
         pattern: "^[a-zA-Z0-9._%+-]+@(example\\.internal|internal\\.megacorp\\.local)$"
+
+# ------------------------------------------------------------------------------
+# 3. Declarative Session Chain Rules (Phase 4)
+# ------------------------------------------------------------------------------
+chain_rules:
+  # --- Forbidden Transition: Sensitive Canary Read Blocks Outgoing Email ---
+  - id: "chain-block-sensitive-read-to-email"
+    description: "Prevent sending email notifications if sensitive documents or canaries were read in the session."
+    rule_type: "forbidden_transition"
+    server: "email"
+    tools: ["send_email"]
+    roles: ["*"]
+    forbidden_if_tainted:
+      - "sensitive_file_read"
+
+  # --- Prerequisite Tool Sequence: Require Catalog Search Prior to Inventory Query ---
+  - id: "chain-require-search-before-inventory"
+    description: "Require read-only viewers to search synthetic catalog before checking inventory stock."
+    rule_type: "prerequisite"
+    server: "parts"
+    tools: ["get_inventory"]
+    roles: ["viewer"]
+    prerequisite_tool: "search_parts"
+
+  # --- Per-Session Invocation Limit: Throttle Email Dispatches ---
+  - id: "chain-limit-email-invocations"
+    description: "Limit forwarded simulated email invocations to a maximum of 5 per session."
+    rule_type: "invocation_limit"
+    server: "email"
+    tools: ["send_email"]
+    roles: ["operator", "admin"]
+    max_invocations: 5
