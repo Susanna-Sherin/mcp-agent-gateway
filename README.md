@@ -10,9 +10,9 @@ MCP Agent Gateway acts as an intelligent intermediary between autonomous AI agen
 
 ---
 
-## Current Status: Phase 4 (Session State and Tool-Chain Rules)
+## Current Status: Phase 5 (Security Scanners & Tool Description Pinning)
 
-Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), Phase 3 (Deterministic Policy Engine), and Phase 4 (Session State & Tool-Chain Rules) are implemented. Subsequent phases will introduce scanners, approval workflows, and persistent audit storage.
+Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), Phase 3 (Deterministic Policy Engine), Phase 4 (Session State & Tool-Chain Rules), and Phase 5 (Security Scanners & Tool Description Pinning) are implemented. Subsequent phases will introduce approval workflows, persistent audit storage, and dashboard management.
 
 ### Project Layout
 
@@ -258,11 +258,88 @@ Chain rules extend the YAML policy document under `chain_rules:` with strict Pyd
 
 ---
 
+## Phase 5: Security Scanners & Tool Description Pinning
+
+Phase 5 introduces comprehensive pre-forwarding input filtering, post-execution output redaction, and cryptographic tool-definition verification.
+
+### 1. Deterministic PII Scanner & Luhn Validator (`mcp_agent_gateway.scanners.pii`)
+
+- **Deterministic Pattern Recognizers:** Detects US Social Security Numbers (`US_SSN`, strictly SSA-compliant excluding area numbers 000, 666, 900–999), RFC-compliant email addresses (`EMAIL`), and international/North American phone numbers (`PHONE`).
+- **Payment Card Detection with Luhn (Mod 10) Checksum:** Candidate payment card numbers (13–19 digits matching major card issuer patterns) must pass a full Luhn verification algorithm. Numbers failing the mod 10 checksum are preserved as non-sensitive strings to prevent overblocking.
+- **Pure-Python Offline Engine:** Operates 100% offline with zero mandatory external NLP models or heavy dependencies. Microsoft Presidio Analyzer is supported as an optional pluggable backend when installed.
+- **Safe Reverse-Index Redaction:** Replaces detected entities in text with `[REDACTED_{ENTITY_TYPE}]` using reverse-index substitution to maintain offset integrity without corrupting adjacent text.
+- **Recursive Structural Traversal:** Recursively inspects and redacts arbitrarily nested dictionaries, lists, sets, and strings across tool arguments and outputs.
+
+### 2. Prompt-Injection Scanner & Conditional Gemini Judge (`mcp_agent_gateway.scanners.prompt_injection`)
+
+- **Tier 1 (Deterministic Signatures & Suspicion Scoring):** Weighted regular expression patterns detect system prompt overrides, instruction resets, jailbreak personas (DAN/developer mode), raw chat template markup (`<|im_start|>`), and confidential exfiltration directives.
+- **Immediate Heuristic Denial:** High-confidence attacks (suspicion score >= 0.85) are blocked deterministically without making an LLM call.
+- **Benign Query Protection:** Standard motor parts catalog queries (`search_parts`, part numbers, inventory counts) evaluate with low suspicion scores (< 0.40) and pass without interruption.
+- **Tier 2 (Conditional Gemini Judge):** Ambiguous suspicious inputs (0.40 <= score < 0.85) are routed to a structured Gemini model classification call ONLY when `scanner_gemini_judge_enabled` is explicitly configured and an API key is present.
+- **Security Boundaries:** The Gemini judge NEVER makes role or tool authorization decisions, and CANNOT override static policy or chain rule denials. If the judge is unavailable or raises an error, the gateway fails closed (`SCANNER_PROMPT_INJECTION`).
+
+### 3. Tool Description & Schema Pinning (`mcp_agent_gateway.scanners.tool_pinning`)
+
+- **Rug-Pulling & Tampering Defense:** Protects against compromised or rogue MCP servers dynamically altering tool descriptions, instructions, or input schemas at runtime.
+- **Canonical Hash Generation:** Normalizes tool name, description, and input schema using deterministic JSON sorting and whitespace suppression, generating canonical SHA-256 digests.
+- **Administrative Enrollment:** Discovered tool definitions are explicitly enrolled via `enroll_tool_pins()` and saved to `config/tool_pins.json`. Runtime execution NEVER silently enrolls or mutates pins.
+- **Strict Verification:** Un-enrolled tools or mismatched hash digests are immediately denied (`TOOL_DESCRIPTION_PIN_MISMATCH` or `TOOL_DESCRIPTION_UNKNOWN_PIN`).
+- **Security Scope Notice:** A local JSON pin file is not cryptographically signed or protected against an attacker with local file-write privileges who can modify application files. Its security guarantee is specifically defending against external or subprocess MCP servers tampering with tools at runtime.
+
+### 4. Comprehensive 9-Step Gateway Invocation Pipeline
+
+`MCPGatewayProxy.invoke_tool` strictly enforces this 9-step execution flow:
+
+```text
+1. Resolve Registered Tool & Verify Description Pin
+   ├── If unknown tool: return unknown_tool outcome immediately.
+   └── If tool_pinning_enabled: verify live tool against enrolled SHA-256 hash pins.
+       └── Fail closed if unknown or mismatched (TOOL_DESCRIPTION_PIN_MISMATCH).
+2. Resolve or Create Trusted Session & Verify Bound Role
+   ├── Fail closed if session manager missing or session revoked (SESSION_STATE_ERROR).
+   └── Reject if session bound to conflicting role (SESSION_ROLE_MISMATCH).
+[Per-Session Async Lock Acquired]
+3. Evaluate Phase 3 Static Policy
+   ├── Fail closed if policy engine is missing (POLICY_LOAD_ERROR).
+   └── Static policy denial takes strict precedence (RULE_BLOCK, DEFAULT_DENY, etc.).
+4. Evaluate Phase 4 Chain Rules
+   ├── Fail closed if chain engine missing or errors (CHAIN_EVALUATION_ERROR).
+   └── Enforce taints, prerequisites, and invocation limits before any MCP subprocess.
+4.5. Evaluate Pre-Forwarding Input Scanners
+   ├── Block confidential canary token exfiltration (SCANNER_CANARY_LEAKAGE).
+   ├── Block input PII in tool arguments (SCANNER_PII_DETECTED).
+   ├── Block input prompt injections (SCANNER_PROMPT_INJECTION).
+   └── Scanner exceptions fail closed and release session lock (SCANNER_ERROR).
+5. Forward to MCP Client
+   └── Subprocess invocation occurs ONLY if all prior checks passed.
+5.5. Evaluate Post-Execution Output Scanners
+   ├── Detect synthetic benchmark canary token in output (canary_leakage_detected).
+   └── Redact discovered PII entities from output ([REDACTED_{ENTITY_TYPE}]).
+6. Update Session State
+   ├── Record minimal call history ("success", "error", "denied").
+   ├── Increment forwarded tool counts for forwarded executions.
+   └── Apply security taints on explicit sensitive document reads.
+7. Record Audit Entry
+   └── Append ToolCallRecord with scanner_results, redacting sensitive arguments.
+```
+
+### 5. Phase 5 Configuration Settings
+
+| Setting | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `scanner_pii_enabled` | `SCANNER_PII_ENABLED` | `true` | Scan tool arguments for PII and redact output PII. |
+| `scanner_injection_enabled` | `SCANNER_INJECTION_ENABLED` | `true` | Evaluate input arguments for prompt injection signatures. |
+| `scanner_gemini_judge_enabled` | `SCANNER_GEMINI_JUDGE_ENABLED` | `false` | Enable Tier 2 Gemini judge for ambiguous inputs. |
+| `tool_pinning_enabled` | `TOOL_PINNING_ENABLED` | `true` | Enforce SHA-256 hash pinning for tool descriptions/schemas. |
+| `tool_pins_path` | `TOOL_PINS_PATH` | `config/tool_pins.json` | Path to enrolled tool description pins configuration. |
+
+---
+
 ## Security Guidelines
 
 - **Never commit `.env` or real credentials to version control.**
 - Use `.env.example` solely as a documentation template for configuration keys.
-- Input/output security scanning (e.g., Presidio, prompt guards) will be enabled in Phase 5.
+- Scanners run pre-forwarding on inputs and post-execution on outputs to prevent data leakage.
 
 ---
 
@@ -273,6 +350,6 @@ Chain rules extend the YAML policy document under `chain_rules:` with strict Pyd
 - **Phase 2:** MCP Gateway proxy and call recording *(Done)*
 - **Phase 3:** Deterministic policy engine and RBAC enforcement *(Done)*
 - **Phase 4:** Session state, trusted role binding, and tool-chain rules *(Done)*
-- **Phase 5:** PII/secret scanners, prompt guards, and human-in-the-loop approvals
+- **Phase 5:** PII scanning, prompt injection guards, and tool description pinning *(Done)*
 - **Phase 6:** Immutable audit storage, OpenTelemetry tracing, and observability
 - **Phase 7:** Multi-agent orchestration and management dashboard

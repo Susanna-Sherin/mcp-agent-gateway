@@ -129,6 +129,7 @@ class GatewayAgent:
                 "session_id": inv_result.session_id,
                 "session_seq": inv_result.session_seq,
                 "chain_decision": inv_result.chain_decision,
+                "scanner_results": inv_result.scanner_results,
             }
             new_executed.append(record)
             messages.append(

@@ -26,6 +26,7 @@ class ToolCallRecord:
     session_id: str | None = None
     session_seq: int | None = None
     chain_decision: dict[str, Any] | None = None
+    scanner_results: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert record to JSON-serializable dictionary."""

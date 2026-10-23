@@ -1,0 +1,13 @@
+{
+  "description": "Enrolled canonical SHA-256 hashes of MCP tool descriptions and schemas",
+  "security_notice": "A local JSON file is not cryptographically signed or protected against local file-write attacks. Its guarantee is defending against runtime MCP server tampering or rug-pulling.",
+  "tools": {
+    "email:list_outbox": "e8f87290c7f6bec82917ea1bddc81ee0910365c4c76d035e5c08e875ce50ea19",
+    "email:send_email": "94919e9dc9e76dce1c8e44afbbd6143990f9b7d00a9cd88b3caf14ffe95ac0a7",
+    "files:list_files": "ff763af17232f3af225814ab3480e96bf4a74179c174b34a43cb39ef9e6db1cf",
+    "files:read_file": "34e6f113c2602f182b5b1490e27b09aeebdc22e27312ccba6be228aa848c65b8",
+    "parts:get_inventory": "fda3b9497b0d47f8c229b6136978a99b24928a972e1c6aa0ef48e9c5f8174555",
+    "parts:search_parts": "07255fa39b464fef7a80f5772474726c1f3ce5dabbdde11cca5a5304c4df5e96"
+  },
+  "version": "1.0"
+}

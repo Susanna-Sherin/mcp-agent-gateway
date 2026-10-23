@@ -47,6 +47,26 @@ class Settings(BaseModel):
         default=Path("config/policies.yaml"),
         description="Path to declarative policies configuration file.",
     )
+    scanner_pii_enabled: bool = Field(
+        default=True,
+        description="Enable PII inspection on arguments and results.",
+    )
+    scanner_injection_enabled: bool = Field(
+        default=True,
+        description="Enable prompt injection inspection on arguments.",
+    )
+    scanner_gemini_judge_enabled: bool = Field(
+        default=False,
+        description="Enable Gemini judge for ambiguous injection scores.",
+    )
+    tool_pinning_enabled: bool = Field(
+        default=False,
+        description="Enforce canonical SHA-256 tool description hash pinning.",
+    )
+    tool_pins_path: Path = Field(
+        default=Path("config/tool_pins.json"),
+        description="Path to enrolled tool pins configuration file.",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -67,4 +87,13 @@ def get_settings() -> Settings:
         gateway_name=os.getenv("GATEWAY_NAME", "mcp-agent-gateway"),
         policy_enforcement_mode=os.getenv("POLICY_ENFORCEMENT_MODE", "permissive"),
         policy_config_path=Path(os.getenv("POLICY_CONFIG_PATH", "config/policies.yaml")),
+        scanner_pii_enabled=os.getenv("SCANNER_PII_ENABLED", "true").lower()
+        in ("true", "1", "yes"),
+        scanner_injection_enabled=os.getenv("SCANNER_INJECTION_ENABLED", "true").lower()
+        in ("true", "1", "yes"),
+        scanner_gemini_judge_enabled=os.getenv("SCANNER_GEMINI_JUDGE_ENABLED", "false").lower()
+        in ("true", "1", "yes"),
+        tool_pinning_enabled=os.getenv("TOOL_PINNING_ENABLED", "false").lower()
+        in ("true", "1", "yes"),
+        tool_pins_path=Path(os.getenv("TOOL_PINS_PATH", "config/tool_pins.json")),
     )
