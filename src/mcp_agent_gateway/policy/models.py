@@ -14,7 +14,7 @@ class PolicyDecision:
     """Result of evaluating an attempted tool invocation against security policies."""
 
     allowed: bool
-    action: Literal["allow", "block", "deny"]
+    action: Literal["allow", "block", "deny", "require_approval"]
     rule_id: str | None
     reason_code: str
     reason: str
@@ -98,7 +98,9 @@ class PolicyRule(BaseModel):
 
     id: str = Field(..., description="Unique alphanumeric identifier for the rule.")
     description: str = Field(default="", description="Human-readable rationale for the rule.")
-    action: Literal["allow", "block"] = Field(..., description="Rule action: allow or block.")
+    action: Literal["allow", "block", "require_approval"] = Field(
+        ..., description="Rule action: allow, block, or require_approval."
+    )
     roles: list[str] = Field(..., description="Roles to which this rule applies, or ['*'].")
     server: str = Field(..., description="Target MCP server name, or '*'.")
     tools: list[str] = Field(..., description="List of tool names, or ['*'].")

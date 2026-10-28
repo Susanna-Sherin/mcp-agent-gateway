@@ -122,6 +122,17 @@ rules:
         type: "string"
         pattern: "^[a-zA-Z0-9._%+-]+@(example\\.internal|internal\\.megacorp\\.local)$"
 
+  - id: "rule-require-approval-broadcast-email"
+    description: "Require human approval for operators sending broadcast messages to all staff."
+    action: "require_approval"
+    roles: ["operator"]
+    server: "email"
+    tools: ["send_email"]
+    argument_constraints:
+      to:
+        type: "string"
+        pattern: "^all@(example\\.internal|internal\\.megacorp\\.local)$"
+
 # ------------------------------------------------------------------------------
 # 3. Declarative Session Chain Rules (Phase 4)
 # ------------------------------------------------------------------------------

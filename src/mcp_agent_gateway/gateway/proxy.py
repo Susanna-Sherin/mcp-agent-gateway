@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from mcp_agent_gateway.agent.client import MultiServerMCPClient, ToolDefinition
+    from mcp_agent_gateway.approval.manager import ApprovalManager
+    from mcp_agent_gateway.audit.storage import SQLiteAuditStore
     from mcp_agent_gateway.policy.evaluator import PolicyEngine
     from mcp_agent_gateway.scanners.pii import PIIScanner
     from mcp_agent_gateway.scanners.prompt_injection import PromptInjectionScanner
@@ -24,6 +26,8 @@ if TYPE_CHECKING:
     from mcp_agent_gateway.session.manager import SessionManager
     from mcp_agent_gateway.session.rules import ChainRuleEngine
 
+from mcp_agent_gateway.approval.models import compute_request_hash
+from mcp_agent_gateway.audit.storage import AuditPersistenceError
 from mcp_agent_gateway.gateway.records import (
     InMemoryCallRecorder,
     ToolCallRecord,
@@ -55,6 +59,7 @@ class GatewayInvocationResult:
     session_seq: int | None = None
     chain_decision: dict[str, Any] | None = None
     scanner_results: dict[str, Any] | None = None
+    approval_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation for consumer compatibility."""
@@ -71,6 +76,7 @@ class GatewayInvocationResult:
             "session_seq": self.session_seq,
             "chain_decision": self.chain_decision,
             "scanner_results": self.scanner_results,
+            "approval_id": self.approval_id,
         }
 
 
@@ -92,6 +98,8 @@ class MCPGatewayProxy:
         scanner_injection_enabled: bool | None = None,
         tool_pinning_enabled: bool | None = None,
         gemini_judge_enabled: bool | None = None,
+        approval_manager: ApprovalManager | Any | None = None,
+        audit_store: SQLiteAuditStore | Any | None = None,
     ) -> None:
         from mcp_agent_gateway.config.settings import get_settings
 
@@ -181,8 +189,32 @@ class MCPGatewayProxy:
                 enforce_pinning=self.tool_pinning_enabled,
             )
 
+        # Phase 6: Human Approval Queue & Persistent SQLite Audit Store
+        if approval_manager is not None:
+            self.approval_manager = approval_manager
+        else:
+            from mcp_agent_gateway.approval.manager import ApprovalManager
+
+            self.approval_manager = ApprovalManager(
+                db_path=settings.audit_db_path,
+                timeout_seconds=settings.approval_timeout_seconds,
+            )
+
+        if audit_store is not None:
+            self.audit_store = audit_store
+        else:
+            from mcp_agent_gateway.audit.storage import SQLiteAuditStore
+
+            self.audit_store = SQLiteAuditStore(db_path=settings.audit_db_path)
+
         self._server_map: dict[str, str] = {}
         self._tools_cache: dict[str, Any] = {}
+
+    def _record_audit(self, rec: ToolCallRecord, approval_id: str | None = None) -> None:
+        """Record the call both in-memory and persistently in SQLite."""
+        self.recorder.record(rec)
+        if self.audit_store is not None:
+            self.audit_store.record_call(rec, approval_id=approval_id)
 
     async def discover_tools(self) -> list[ToolDefinition]:
         """Discover tools across configured MCP servers and refresh the server routing map."""
@@ -314,11 +346,11 @@ class MCPGatewayProxy:
         timestamp = generate_timestamp_utc()
         meta = metadata or {}
         role = caller_role or meta.get("caller_role") or self.default_caller_role
+        approval_id: str | None = meta.get("approval_id")
+        approval_to_consume: tuple[str, str] | None = None
 
-        # Sanitize arguments for audit records to ensure no raw sensitive data is retained (F-03)
-        audit_args = (
-            self.pii_scanner.redact_value(arguments) if self.scanner_pii_enabled else arguments
-        )
+        # Sanitize arguments for audit records unconditionally (durable audit privacy guarantee)
+        audit_args = self.pii_scanner.redact_value(arguments)
         if self._contains_canary(audit_args):
             audit_args = self._redact_canary(audit_args)
 
@@ -350,8 +382,9 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 metadata=meta,
                 session_id=session_id,
+                approval_id=approval_id,
             )
-            self.recorder.record(rec)
+            self._record_audit(rec, approval_id=approval_id)
             return GatewayInvocationResult(
                 call_id=call_id,
                 server_name="unknown",
@@ -362,6 +395,7 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 record=rec,
                 session_id=session_id,
+                approval_id=approval_id,
             )
 
         # Tool Description Pinning Verification
@@ -413,8 +447,9 @@ class MCPGatewayProxy:
                     metadata={**meta, "scanner_results": scanner_meta},
                     session_id=session_id,
                     scanner_results=scanner_meta,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                self._record_audit(rec, approval_id=approval_id)
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -426,6 +461,7 @@ class MCPGatewayProxy:
                     record=rec,
                     session_id=session_id,
                     scanner_results=scanner_meta,
+                    approval_id=approval_id,
                 )
 
         # ------------------------------------------------------------------
@@ -451,8 +487,9 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 metadata=meta,
                 session_id=session_id,
+                approval_id=approval_id,
             )
-            self.recorder.record(rec)
+            self._record_audit(rec, approval_id=approval_id)
             return GatewayInvocationResult(
                 call_id=call_id,
                 server_name=server_name,
@@ -463,6 +500,7 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 record=rec,
                 session_id=session_id,
+                approval_id=approval_id,
             )
 
         try:
@@ -491,8 +529,9 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 metadata=meta,
                 session_id=session_id,
+                approval_id=approval_id,
             )
-            self.recorder.record(rec)
+            self._record_audit(rec, approval_id=approval_id)
             return GatewayInvocationResult(
                 call_id=call_id,
                 server_name=server_name,
@@ -503,6 +542,7 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 record=rec,
                 session_id=session_id,
+                approval_id=approval_id,
             )
         except SessionStateError as ex:
             duration_ms = (time.perf_counter() - start_time) * 1000.0
@@ -524,8 +564,9 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 metadata=meta,
                 session_id=session_id,
+                approval_id=approval_id,
             )
-            self.recorder.record(rec)
+            self._record_audit(rec, approval_id=approval_id)
             return GatewayInvocationResult(
                 call_id=call_id,
                 server_name=server_name,
@@ -536,6 +577,7 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 record=rec,
                 session_id=session_id,
+                approval_id=approval_id,
             )
         except Exception as ex:
             duration_ms = (time.perf_counter() - start_time) * 1000.0
@@ -557,8 +599,9 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 metadata=meta,
                 session_id=session_id,
+                approval_id=approval_id,
             )
-            self.recorder.record(rec)
+            self._record_audit(rec, approval_id=approval_id)
             return GatewayInvocationResult(
                 call_id=call_id,
                 server_name=server_name,
@@ -569,6 +612,7 @@ class MCPGatewayProxy:
                 duration_ms=duration_ms,
                 record=rec,
                 session_id=session_id,
+                approval_id=approval_id,
             )
 
         # ------------------------------------------------------------------
@@ -606,8 +650,9 @@ class MCPGatewayProxy:
                     duration_ms=duration_ms,
                     metadata=meta,
                     session_id=resolved_session_id,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                self._record_audit(rec, approval_id=approval_id)
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -618,6 +663,7 @@ class MCPGatewayProxy:
                     duration_ms=duration_ms,
                     record=rec,
                     session_id=resolved_session_id,
+                    approval_id=approval_id,
                 )
 
             # ------------------------------------------------------------------
@@ -650,8 +696,9 @@ class MCPGatewayProxy:
                     metadata=meta,
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                self._record_audit(rec, approval_id=approval_id)
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -663,6 +710,7 @@ class MCPGatewayProxy:
                     record=rec,
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
 
             decision = self.policy_engine.evaluate(
@@ -672,51 +720,253 @@ class MCPGatewayProxy:
                 arguments=arguments,
             )
             if not decision.allowed:
-                duration_ms = (time.perf_counter() - start_time) * 1000.0
-                summary = self.session_manager.record_call(
-                    session_id=resolved_session_id,
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    outcome="denied",
-                )
-                err_result = {
-                    "status": "denied",
-                    "error": decision.reason,
-                    "rule_id": decision.rule_id,
-                    "reason_code": decision.reason_code,
-                }
-                rec = ToolCallRecord(
-                    call_id=call_id,
-                    timestamp_utc=timestamp,
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    arguments=audit_args,
-                    outcome="denied",
-                    result=err_result,
-                    error_message=decision.reason,
-                    duration_ms=duration_ms,
-                    policy_decision=decision.to_dict(),
-                    metadata={
-                        **meta,
-                        "policy": decision.to_dict(),
-                    },
-                    session_id=resolved_session_id,
-                    session_seq=summary.sequence_number,
-                )
-                self.recorder.record(rec)
-                return GatewayInvocationResult(
-                    call_id=call_id,
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    outcome="denied",
-                    result=err_result,
-                    error=decision.reason,
-                    duration_ms=duration_ms,
-                    record=rec,
-                    policy_decision=decision.to_dict(),
-                    session_id=resolved_session_id,
-                    session_seq=summary.sequence_number,
-                )
+                # Handle Phase 6 require_approval action
+                if decision.action == "require_approval":
+                    if not approval_id:
+                        # Initial request without approval token: register PENDING approval
+                        req_hash = compute_request_hash(
+                            session_id=resolved_session_id,
+                            caller_role=role,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                        )
+                        try:
+                            appr_req = self.approval_manager.create_or_get_pending(
+                                session_id=resolved_session_id,
+                                caller_role=role,
+                                server_name=server_name,
+                                tool_name=tool_name,
+                                arguments_sanitized=audit_args,
+                                request_hash=req_hash,
+                            )
+                            approval_id = appr_req.approval_id
+                        except Exception as ex:
+                            duration_ms = (time.perf_counter() - start_time) * 1000.0
+                            err_msg = f"Failed to register approval request: {ex}"
+                            summary = self.session_manager.record_call(
+                                session_id=resolved_session_id,
+                                server_name=server_name,
+                                tool_name=tool_name,
+                                outcome="denied",
+                            )
+                            err_result = {
+                                "status": "denied",
+                                "error": err_msg,
+                                "reason_code": "APPROVAL_STORE_ERROR",
+                            }
+                            rec = ToolCallRecord(
+                                call_id=call_id,
+                                timestamp_utc=timestamp,
+                                server_name=server_name,
+                                tool_name=tool_name,
+                                arguments=audit_args,
+                                outcome="denied",
+                                result=err_result,
+                                error_message=err_msg,
+                                duration_ms=duration_ms,
+                                policy_decision=decision.to_dict(),
+                                metadata=meta,
+                                session_id=resolved_session_id,
+                                session_seq=summary.sequence_number,
+                                approval_id=approval_id,
+                            )
+                            self._record_audit(rec, approval_id=approval_id)
+                            return GatewayInvocationResult(
+                                call_id=call_id,
+                                server_name=server_name,
+                                tool_name=tool_name,
+                                outcome="denied",
+                                result=err_result,
+                                error=err_msg,
+                                duration_ms=duration_ms,
+                                record=rec,
+                                policy_decision=decision.to_dict(),
+                                session_id=resolved_session_id,
+                                session_seq=summary.sequence_number,
+                                approval_id=approval_id,
+                            )
+
+                        duration_ms = (time.perf_counter() - start_time) * 1000.0
+                        err_msg = (
+                            f"Tool call requires human approval (Approval ID: "
+                            f"{appr_req.approval_id})."
+                        )
+                        summary = self.session_manager.record_call(
+                            session_id=resolved_session_id,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            outcome="denied",
+                        )
+                        err_result = {
+                            "status": "denied",
+                            "error": err_msg,
+                            "reason_code": "REQUIRE_APPROVAL",
+                            "rule_id": decision.rule_id,
+                            "approval_id": appr_req.approval_id,
+                            "approval_status": "pending",
+                        }
+                        call_meta = {
+                            **meta,
+                            "policy": decision.to_dict(),
+                            "approval_id": appr_req.approval_id,
+                            "approval_status": "pending",
+                        }
+                        rec = ToolCallRecord(
+                            call_id=call_id,
+                            timestamp_utc=timestamp,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            arguments=audit_args,
+                            outcome="denied",
+                            result=err_result,
+                            error_message=err_msg,
+                            duration_ms=duration_ms,
+                            policy_decision=decision.to_dict(),
+                            metadata=call_meta,
+                            session_id=resolved_session_id,
+                            session_seq=summary.sequence_number,
+                            approval_id=appr_req.approval_id,
+                        )
+                        try:
+                            self._record_audit(rec, approval_id=appr_req.approval_id)
+                        except AuditPersistenceError as ex:
+                            logger.error("Audit persistence failure for pending approval: %s", ex)
+                        return GatewayInvocationResult(
+                            call_id=call_id,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            outcome="denied",
+                            result=err_result,
+                            error=err_msg,
+                            duration_ms=duration_ms,
+                            record=rec,
+                            policy_decision=decision.to_dict(),
+                            session_id=resolved_session_id,
+                            session_seq=summary.sequence_number,
+                            approval_id=appr_req.approval_id,
+                        )
+
+                    # An approval_id was passed: Validate request binding and approval state
+                    req_hash = compute_request_hash(
+                        session_id=resolved_session_id,
+                        caller_role=role,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                    )
+                    valid, claim_code, appr_req = self.approval_manager.validate_approval(
+                        approval_id=approval_id,
+                        request_hash=req_hash,
+                        session_id=resolved_session_id,
+                        caller_role=role,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                    )
+                    if not valid:
+                        duration_ms = (time.perf_counter() - start_time) * 1000.0
+                        err_msg = f"Approval claim rejected: {claim_code}"
+                        summary = self.session_manager.record_call(
+                            session_id=resolved_session_id,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            outcome="denied",
+                        )
+                        err_result = {
+                            "status": "denied",
+                            "error": err_msg,
+                            "reason_code": claim_code,
+                            "approval_id": approval_id,
+                        }
+                        call_meta = {
+                            **meta,
+                            "policy": decision.to_dict(),
+                            "approval_id": approval_id,
+                            "approval_error": claim_code,
+                        }
+                        rec = ToolCallRecord(
+                            call_id=call_id,
+                            timestamp_utc=timestamp,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            arguments=audit_args,
+                            outcome="denied",
+                            result=err_result,
+                            error_message=err_msg,
+                            duration_ms=duration_ms,
+                            policy_decision=decision.to_dict(),
+                            metadata=call_meta,
+                            session_id=resolved_session_id,
+                            session_seq=summary.sequence_number,
+                            approval_id=approval_id,
+                        )
+                        self._record_audit(rec, approval_id=approval_id)
+                        return GatewayInvocationResult(
+                            call_id=call_id,
+                            server_name=server_name,
+                            tool_name=tool_name,
+                            outcome="denied",
+                            result=err_result,
+                            error=err_msg,
+                            duration_ms=duration_ms,
+                            record=rec,
+                            policy_decision=decision.to_dict(),
+                            session_id=resolved_session_id,
+                            session_seq=summary.sequence_number,
+                            approval_id=approval_id,
+                        )
+
+                    # Binding and approval valid! Mark for consumption before MCP forwarding.
+                    approval_to_consume = (approval_id, req_hash)
+
+                else:
+                    duration_ms = (time.perf_counter() - start_time) * 1000.0
+                    summary = self.session_manager.record_call(
+                        session_id=resolved_session_id,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        outcome="denied",
+                    )
+                    err_result = {
+                        "status": "denied",
+                        "error": decision.reason,
+                        "rule_id": decision.rule_id,
+                        "reason_code": decision.reason_code,
+                    }
+                    rec = ToolCallRecord(
+                        call_id=call_id,
+                        timestamp_utc=timestamp,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        arguments=audit_args,
+                        outcome="denied",
+                        result=err_result,
+                        error_message=decision.reason,
+                        duration_ms=duration_ms,
+                        policy_decision=decision.to_dict(),
+                        metadata={
+                            **meta,
+                            "policy": decision.to_dict(),
+                        },
+                        session_id=resolved_session_id,
+                        session_seq=summary.sequence_number,
+                        approval_id=approval_id,
+                    )
+                    self._record_audit(rec, approval_id=approval_id)
+                    return GatewayInvocationResult(
+                        call_id=call_id,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        outcome="denied",
+                        result=err_result,
+                        error=decision.reason,
+                        duration_ms=duration_ms,
+                        record=rec,
+                        policy_decision=decision.to_dict(),
+                        session_id=resolved_session_id,
+                        session_seq=summary.sequence_number,
+                        approval_id=approval_id,
+                    )
 
             # ------------------------------------------------------------------
             # Step 4: Evaluate chain rules before any MCP subprocess or side effect
@@ -749,8 +999,9 @@ class MCPGatewayProxy:
                     metadata=meta,
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                self._record_audit(rec, approval_id=approval_id)
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -763,6 +1014,7 @@ class MCPGatewayProxy:
                     policy_decision=decision.to_dict(),
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
 
             try:
@@ -814,8 +1066,9 @@ class MCPGatewayProxy:
                     },
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                self._record_audit(rec, approval_id=approval_id)
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -829,6 +1082,7 @@ class MCPGatewayProxy:
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
                     chain_decision=chain_decision.to_dict(),
+                    approval_id=approval_id,
                 )
 
             # ------------------------------------------------------------------
@@ -878,8 +1132,9 @@ class MCPGatewayProxy:
                     },
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                self._record_audit(rec, approval_id=approval_id)
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -894,6 +1149,7 @@ class MCPGatewayProxy:
                     session_seq=summary.sequence_number,
                     chain_decision=chain_decision.to_dict(),
                     scanner_results=active_scanner_results,
+                    approval_id=approval_id,
                 )
 
             # 2. Recursive Input PII Scanning
@@ -947,8 +1203,9 @@ class MCPGatewayProxy:
                             },
                             session_id=resolved_session_id,
                             session_seq=summary.sequence_number,
+                            approval_id=approval_id,
                         )
-                        self.recorder.record(rec)
+                        self._record_audit(rec, approval_id=approval_id)
                         return GatewayInvocationResult(
                             call_id=call_id,
                             server_name=server_name,
@@ -963,6 +1220,7 @@ class MCPGatewayProxy:
                             session_seq=summary.sequence_number,
                             chain_decision=chain_decision.to_dict(),
                             scanner_results=active_scanner_results,
+                            approval_id=approval_id,
                         )
                 except Exception as ex:
                     duration_ms = (time.perf_counter() - start_time) * 1000.0
@@ -993,8 +1251,9 @@ class MCPGatewayProxy:
                         metadata=meta,
                         session_id=resolved_session_id,
                         session_seq=summary.sequence_number,
+                        approval_id=approval_id,
                     )
-                    self.recorder.record(rec)
+                    self._record_audit(rec, approval_id=approval_id)
                     return GatewayInvocationResult(
                         call_id=call_id,
                         server_name=server_name,
@@ -1008,6 +1267,7 @@ class MCPGatewayProxy:
                         session_id=resolved_session_id,
                         session_seq=summary.sequence_number,
                         chain_decision=chain_decision.to_dict(),
+                        approval_id=approval_id,
                     )
 
             # 3. Prompt Injection Scanning
@@ -1053,8 +1313,9 @@ class MCPGatewayProxy:
                             },
                             session_id=resolved_session_id,
                             session_seq=summary.sequence_number,
+                            approval_id=approval_id,
                         )
-                        self.recorder.record(rec)
+                        self._record_audit(rec, approval_id=approval_id)
                         return GatewayInvocationResult(
                             call_id=call_id,
                             server_name=server_name,
@@ -1069,6 +1330,7 @@ class MCPGatewayProxy:
                             session_seq=summary.sequence_number,
                             chain_decision=chain_decision.to_dict(),
                             scanner_results=active_scanner_results,
+                            approval_id=approval_id,
                         )
                 except Exception as ex:
                     duration_ms = (time.perf_counter() - start_time) * 1000.0
@@ -1099,8 +1361,9 @@ class MCPGatewayProxy:
                         metadata=meta,
                         session_id=resolved_session_id,
                         session_seq=summary.sequence_number,
+                        approval_id=approval_id,
                     )
-                    self.recorder.record(rec)
+                    self._record_audit(rec, approval_id=approval_id)
                     return GatewayInvocationResult(
                         call_id=call_id,
                         server_name=server_name,
@@ -1114,11 +1377,131 @@ class MCPGatewayProxy:
                         session_id=resolved_session_id,
                         session_seq=summary.sequence_number,
                         chain_decision=chain_decision.to_dict(),
+                        approval_id=approval_id,
                     )
 
             # ------------------------------------------------------------------
             # Step 5: Forward only when all mandatory checks pass
             # ------------------------------------------------------------------
+            # Pre-execution audit storage check (Rule 6: fail closed if unavailable)
+            if self.audit_store is not None:
+                try:
+                    with self.audit_store._get_connection():
+                        pass
+                except Exception as ex:
+                    duration_ms = (time.perf_counter() - start_time) * 1000.0
+                    err_msg = f"Audit persistence unavailable; operation denied fail-closed: {ex}"
+                    summary = self.session_manager.record_call(
+                        session_id=resolved_session_id,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        outcome="denied",
+                    )
+                    err_result = {
+                        "status": "denied",
+                        "error": err_msg,
+                        "reason_code": "AUDIT_PERSISTENCE_ERROR",
+                    }
+                    rec = ToolCallRecord(
+                        call_id=call_id,
+                        timestamp_utc=timestamp,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        arguments=audit_args,
+                        outcome="denied",
+                        result=err_result,
+                        error_message=err_msg,
+                        duration_ms=duration_ms,
+                        policy_decision=decision.to_dict(),
+                        chain_decision=chain_decision.to_dict(),
+                        scanner_results=active_scanner_results,
+                        metadata=meta,
+                        session_id=resolved_session_id,
+                        session_seq=summary.sequence_number,
+                        approval_id=approval_id,
+                    )
+                    self.recorder.record(rec)
+                    return GatewayInvocationResult(
+                        call_id=call_id,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        outcome="denied",
+                        result=err_result,
+                        error=err_msg,
+                        duration_ms=duration_ms,
+                        record=rec,
+                        policy_decision=decision.to_dict(),
+                        session_id=resolved_session_id,
+                        session_seq=summary.sequence_number,
+                        chain_decision=chain_decision.to_dict(),
+                        scanner_results=active_scanner_results,
+                        approval_id=approval_id,
+                    )
+
+            # Rule 4: Atomically transition APPROVED to CONSUMED immediately before MCP forwarding,
+            # after all pre-execution checks. Exactly one concurrent claimant may proceed.
+            if approval_to_consume is not None:
+                appr_id, req_h = approval_to_consume
+                claimed, claim_code, appr_req = self.approval_manager.claim_and_consume(
+                    approval_id=appr_id,
+                    request_hash=req_h,
+                    session_id=resolved_session_id,
+                    caller_role=role,
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    call_id=call_id,
+                )
+                if not claimed:
+                    duration_ms = (time.perf_counter() - start_time) * 1000.0
+                    err_msg = f"Approval claim rejected: {claim_code}"
+                    summary = self.session_manager.record_call(
+                        session_id=resolved_session_id,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        outcome="denied",
+                    )
+                    err_result = {
+                        "status": "denied",
+                        "error": err_msg,
+                        "reason_code": claim_code,
+                        "approval_id": appr_id,
+                    }
+                    rec = ToolCallRecord(
+                        call_id=call_id,
+                        timestamp_utc=timestamp,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        arguments=audit_args,
+                        outcome="denied",
+                        result=err_result,
+                        error_message=err_msg,
+                        duration_ms=duration_ms,
+                        policy_decision=decision.to_dict(),
+                        chain_decision=chain_decision.to_dict(),
+                        scanner_results=active_scanner_results,
+                        metadata=meta,
+                        session_id=resolved_session_id,
+                        session_seq=summary.sequence_number,
+                        approval_id=appr_id,
+                    )
+                    self._record_audit(rec, approval_id=appr_id)
+                    return GatewayInvocationResult(
+                        call_id=call_id,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        outcome="denied",
+                        result=err_result,
+                        error=err_msg,
+                        duration_ms=duration_ms,
+                        record=rec,
+                        policy_decision=decision.to_dict(),
+                        session_id=resolved_session_id,
+                        session_seq=summary.sequence_number,
+                        chain_decision=chain_decision.to_dict(),
+                        scanner_results=active_scanner_results,
+                        approval_id=appr_id,
+                    )
+
             try:
                 result = await self.mcp_client.call_tool(tool_name, arguments)
                 duration_ms = (time.perf_counter() - start_time) * 1000.0
@@ -1200,8 +1583,35 @@ class MCPGatewayProxy:
                     metadata=call_metadata,
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                try:
+                    self._record_audit(rec, approval_id=approval_id)
+                except AuditPersistenceError as ex:
+                    # Rule 6: If post-execution logging fails, never retry the tool automatically
+                    logger.error("Post-execution audit persistence failed: %s", ex)
+                    err_result = {
+                        "status": "error",
+                        "error": f"Tool executed but post-execution audit persistence failed: {ex}",
+                        "reason_code": "AUDIT_PERSISTENCE_ERROR",
+                    }
+                    return GatewayInvocationResult(
+                        call_id=call_id,
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        outcome="error",
+                        result=err_result,
+                        error=str(ex),
+                        duration_ms=duration_ms,
+                        record=rec,
+                        policy_decision=decision_dict,
+                        session_id=resolved_session_id,
+                        session_seq=summary.sequence_number,
+                        chain_decision=chain_dict,
+                        scanner_results=active_scanner_results,
+                        approval_id=approval_id,
+                    )
+
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -1216,6 +1626,7 @@ class MCPGatewayProxy:
                     session_seq=summary.sequence_number,
                     chain_decision=chain_dict,
                     scanner_results=active_scanner_results,
+                    approval_id=approval_id,
                 )
             except Exception as ex:
                 duration_ms = (time.perf_counter() - start_time) * 1000.0
@@ -1257,8 +1668,13 @@ class MCPGatewayProxy:
                     metadata=call_metadata,
                     session_id=resolved_session_id,
                     session_seq=summary.sequence_number,
+                    approval_id=approval_id,
                 )
-                self.recorder.record(rec)
+                try:
+                    self._record_audit(rec, approval_id=approval_id)
+                except Exception as audit_ex:
+                    logger.error("Audit persistence failure during execution error: %s", audit_ex)
+
                 return GatewayInvocationResult(
                     call_id=call_id,
                     server_name=server_name,
@@ -1273,6 +1689,7 @@ class MCPGatewayProxy:
                     session_seq=summary.sequence_number,
                     chain_decision=chain_dict,
                     scanner_results=active_scanner_results,
+                    approval_id=approval_id,
                 )
 
     def invoke_tool_sync(

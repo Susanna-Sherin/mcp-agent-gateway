@@ -250,6 +250,24 @@ class PolicyEngine:
                     tool=tool,
                 )
 
+        # 4.5. Require-approval precedence: Evaluate matching require_approval rules
+        approval_rules = [r for r in matching_rules if r.action == "require_approval"]
+        for ap_rule in approval_rules:
+            satisfied, reason = self._evaluate_allow_rule_satisfaction(ap_rule, arguments)
+            if satisfied:
+                return PolicyDecision(
+                    allowed=False,
+                    action="require_approval",
+                    rule_id=ap_rule.id,
+                    reason_code="REQUIRE_APPROVAL",
+                    reason=(
+                        f"Tool invocation requires human approval per security rule '{ap_rule.id}'"
+                    ),
+                    caller_role=caller_role,
+                    server=server,
+                    tool=tool,
+                )
+
         # 5. Evaluate matching allow rules
         allow_rules = [r for r in matching_rules if r.action == "allow"]
         failed_allow_reasons: list[str] = []

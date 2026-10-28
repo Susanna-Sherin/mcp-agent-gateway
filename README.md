@@ -10,9 +10,9 @@ MCP Agent Gateway acts as an intelligent intermediary between autonomous AI agen
 
 ---
 
-## Current Status: Phase 5 (Security Scanners & Tool Description Pinning)
+## Current Status: Phase 6 (Human Approval Queue & Persistent SQLite Audit Log)
 
-Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), Phase 3 (Deterministic Policy Engine), Phase 4 (Session State & Tool-Chain Rules), and Phase 5 (Security Scanners & Tool Description Pinning) are implemented. Subsequent phases will introduce approval workflows, persistent audit storage, and dashboard management.
+Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), Phase 3 (Deterministic Policy Engine), Phase 4 (Session State & Tool-Chain Rules), Phase 5 (Security Scanners & Tool Description Pinning), and Phase 6 (Human Approval Queue & Persistent SQLite Audit Log) are fully implemented.
 
 ### Project Layout
 
@@ -335,11 +335,71 @@ Phase 5 introduces comprehensive pre-forwarding input filtering, post-execution 
 
 ---
 
+## Phase 6: Human Approval Queue & Persistent SQLite Audit Log
+
+Phase 6 introduces asynchronous human-in-the-loop authorization gates and tamper-evident persistent compliance logging backed by SQLite.
+
+### 1. Human Approval State Machine (`mcp_agent_gateway.approval`)
+
+```text
+                  ┌──────────────┐
+                  │   PENDING    │
+                  └──────┬───────┘
+          ┌──────────────┼──────────────┐
+          │ (approve)    │ (reject)     │ (TTL expired)
+          ▼              ▼              ▼
+   ┌─────────────┐ ┌────────────┐ ┌───────────┐
+   │  APPROVED   │ │  REJECTED  │ │  EXPIRED  │
+   └──────┬──────┘ └────────────┘ └───────────┘
+          │ (claimed by gateway)
+          ▼
+   ┌─────────────┐
+   │  CONSUMED   │ (irreversible, single-use)
+   └─────────────┘
+```
+
+- **Atomic Single-Use Claim:** Transition from `APPROVED` to `CONSUMED` occurs atomically in SQLite immediately before any tool forwarding. Only one claimant may succeed; any subsequent replay attempts are denied (`APPROVAL_ALREADY_CONSUMED`).
+- **Irreversible Consumption:** Once consumed, an approval is never restored—even if downstream MCP execution times out, raises an exception, or the gateway restarts. Retrying requires submitting a fresh approval request.
+- **Cryptographic Request Binding:** Approvals are bound to a deterministic SHA-256 fingerprint computed across gateway-resolved caller identity, role, session ID, server, tool, and canonical sorted arguments. Modifying any parameter causes claim rejection (`APPROVAL_BINDING_MISMATCH`).
+- **Current-State Revalidation:** Upon claim, the gateway revalidates session activity, role match, static block rules, chain rules (taints/limits), and pre-forwarding scanners. Explicit block rules always take absolute precedence.
+
+### 2. Persistent SQLite Audit Storage (`mcp_agent_gateway.audit`)
+
+- **Durable Source of Truth:** Every terminal invocation outcome (`success`, `error`, `unknown_tool`, `denied`), policy decision, chain decision, scanner result, and approval identifier is durably recorded in SQLite (`data/gateway.db`).
+- **Privacy Sanitization Guarantee:** Only sanitized argument and result representations (PII redacted, canary tokens replaced) are persisted to disk. Raw unsanitized arguments and raw stack traces are never written to SQLite.
+- **Fail-Closed Persistence Semantics:** If pre-execution audit storage is unavailable, protected operations fail closed (`AUDIT_PERSISTENCE_ERROR`). If post-execution audit persistence fails, the error is returned to the caller and the tool is never retried automatically.
+- **High Concurrency Support:** Operates using SQLite Write-Ahead Logging (`WAL`), synchronous normal, and a 5000ms busy timeout.
+
+### 3. Reviewer Authentication & FastAPI Endpoints (`mcp_agent_gateway.api`)
+
+- **Fail-Closed Administrative Auth:** All administrative and reviewer endpoints require `GATEWAY_ADMIN_API_KEY` to be explicitly configured. If absent or empty, administrative endpoints fail closed (`503 Service Unavailable`).
+- **Reviewer Identity Header:** Requests must provide constant-time verified credentials via `X-Admin-Key` (or `Authorization: Bearer <key>`) alongside mandatory `X-Reviewer-Id` header identifying the human reviewer.
+- **Available Endpoints:**
+  - `GET /healthz`: Public system health check.
+  - `GET /approvals/pending`: List active pending approval requests (paginated).
+  - `GET /approvals/{id}`: Inspect details of an approval request.
+  - `POST /approvals/{id}/approve`: Authorized reviewer approves pending request (body: `{"reason": "..."}`).
+  - `POST /approvals/{id}/reject`: Authorized reviewer rejects pending request (body: `{"reason": "..."}`).
+  - `GET /audit/records`: Query durable audit log with filtering (`session_id`, `tool_name`, `outcome`) and pagination (`limit`, `offset`).
+  - `GET /audit/records/{call_id}`: Retrieve full audit record for a specific call ID.
+
+### 4. Phase 6 Configuration Settings
+
+| Setting | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `audit_db_path` | `AUDIT_DB_PATH` | `data/gateway.db` | Persistent SQLite database path for audit logs and approval queue. |
+| `approval_timeout_seconds` | `APPROVAL_TIMEOUT_SECONDS` | `300` | Approval request time-to-live in seconds before auto-expiring. |
+| `audit_retention_days` | `AUDIT_RETENTION_DAYS` | `90` | Audit record retention period in days. |
+| `admin_api_key` | `GATEWAY_ADMIN_API_KEY` | `null` | Pre-shared administrative API key. If unset, reviewer endpoints fail closed. |
+
+---
+
 ## Security Guidelines
 
 - **Never commit `.env` or real credentials to version control.**
 - Use `.env.example` solely as a documentation template for configuration keys.
 - Scanners run pre-forwarding on inputs and post-execution on outputs to prevent data leakage.
+- Approvals are single-use, non-transferable, and cryptographically bound to request context.
 
 ---
 
@@ -351,5 +411,5 @@ Phase 5 introduces comprehensive pre-forwarding input filtering, post-execution 
 - **Phase 3:** Deterministic policy engine and RBAC enforcement *(Done)*
 - **Phase 4:** Session state, trusted role binding, and tool-chain rules *(Done)*
 - **Phase 5:** PII scanning, prompt injection guards, and tool description pinning *(Done)*
-- **Phase 6:** Immutable audit storage, OpenTelemetry tracing, and observability
+- **Phase 6:** Human approval queue and persistent SQLite audit logging *(Done)*
 - **Phase 7:** Multi-agent orchestration and management dashboard

@@ -67,6 +67,25 @@ class Settings(BaseModel):
         default=Path("config/tool_pins.json"),
         description="Path to enrolled tool pins configuration file.",
     )
+    audit_db_path: Path = Field(
+        default=Path("data/gateway.db"),
+        description="Path to persistent SQLite database for audit and approval records.",
+    )
+    approval_timeout_seconds: int = Field(
+        default=300,
+        description="Time-to-live for pending approval requests in seconds.",
+    )
+    audit_retention_days: int = Field(
+        default=90,
+        description="Audit record retention period in days.",
+    )
+    admin_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Pre-shared administrative API key for reviewer endpoints. "
+            "If None, reviewer endpoints fail closed."
+        ),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -77,6 +96,19 @@ def get_settings() -> Settings:
         raw_port = int(os.getenv("APP_PORT", "8000"))
     except ValueError:
         raw_port = 8000
+
+    try:
+        approval_timeout = int(os.getenv("APPROVAL_TIMEOUT_SECONDS", "300"))
+    except ValueError:
+        approval_timeout = 300
+
+    try:
+        audit_retention = int(os.getenv("AUDIT_RETENTION_DAYS", "90"))
+    except ValueError:
+        audit_retention = 90
+
+    raw_admin_key = os.getenv("GATEWAY_ADMIN_API_KEY")
+    admin_key = raw_admin_key if raw_admin_key and raw_admin_key.strip() else None
 
     return Settings(
         environment=os.getenv("ENVIRONMENT", "development"),  # type: ignore[arg-type]
@@ -96,4 +128,8 @@ def get_settings() -> Settings:
         tool_pinning_enabled=os.getenv("TOOL_PINNING_ENABLED", "false").lower()
         in ("true", "1", "yes"),
         tool_pins_path=Path(os.getenv("TOOL_PINS_PATH", "config/tool_pins.json")),
+        audit_db_path=Path(os.getenv("AUDIT_DB_PATH", "data/gateway.db")),
+        approval_timeout_seconds=approval_timeout,
+        audit_retention_days=audit_retention,
+        admin_api_key=admin_key,
     )
