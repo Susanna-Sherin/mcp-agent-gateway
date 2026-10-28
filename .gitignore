@@ -80,3 +80,9 @@ data/synthetic/outbox/*.json
 data/*.db
 data/*.db-wal
 data/*.db-shm
+
+# Evaluation reports and benchmark dumps
+eval_report*.json
+eval_results*.json
+data/eval_*.json
+reports/
