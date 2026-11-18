@@ -10,9 +10,9 @@ MCP Agent Gateway acts as an intelligent intermediary between autonomous AI agen
 
 ---
 
-## Current Status: Phase 7 (Red-Team Evaluation Harness)
+## Current Status: Phase 8 (Observability and Tracing)
 
-Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), Phase 3 (Deterministic Policy Engine), Phase 4 (Session State & Tool-Chain Rules), Phase 5 (Security Scanners & Tool Description Pinning), Phase 6 (Human Approval Queue & Persistent SQLite Audit Log), and Phase 7 (Red-Team Evaluation Harness) are fully implemented.
+Phase 0 (Foundations), Phase 1 (Vulnerable Baseline), Phase 2 (Gateway Proxy & Call Recording), Phase 3 (Deterministic Policy Engine), Phase 4 (Session State & Tool-Chain Rules), Phase 5 (Security Scanners & Tool Description Pinning), Phase 6 (Human Approval Queue & Persistent SQLite Audit Log), Phase 7 (Red-Team Evaluation Harness), and Phase 8 (Observability and Tracing) are fully implemented.
 
 ### Project Layout
 
@@ -35,7 +35,7 @@ MCP-Agent-Gateway/
 │       ├── tools/               # MCP tool adapters & sandbox demo tools (Phase 1+)
 │       ├── api/                 # FastAPI HTTP endpoints & management dashboard
 │       ├── agent/               # Agent framework integration (Phase 5+)
-│       └── observability/       # Tracing, metrics & OpenTelemetry hooks (Phase 4+)
+│       └── observability/       # OpenTelemetry SDK, Langfuse adapter & privacy allowlists (Phase 8)
 ├── tests/
 │   ├── __init__.py
 │   ├── test_smoke.py            # Phase 0 verification & import smoke tests
@@ -505,6 +505,84 @@ asyncio.run(main())
 
 ---
 
+## Phase 8: Observability and Tracing
+
+Phase 8 introduces distributed tracing and telemetry across the autonomous agent lifecycle, gateway governance layer, and downstream MCP tool executions, built with OpenTelemetry SDK and an optional Langfuse observability adapter.
+
+### 1. Span Hierarchy & Distributed Context
+
+Traces preserve complete parent-child hierarchy through asynchronous execution contexts:
+
+```text
+agent.run (root workflow span)
+  ├── agent.plan (iteration 1)
+  └── agent.execute_tools
+        └── gateway.invoke_tool (call_id: call_...)
+              └── mcp.tool.execute (tool: read_file)
+```
+
+- **`agent.run`**: Spans the overall LangGraph agent invocation. Correlates `agent.session_id` and `agent.caller_role`.
+- **`agent.plan`**: Spans each planning iteration with `agent.iteration` and `agent.model`.
+- **`agent.execute_tools`**: Spans the tool execution phase for the iteration.
+- **`gateway.invoke_tool`**: Spans the gateway interception flow, capturing policy evaluation, security scanning, approval gating, and duration.
+- **`mcp.tool.execute`**: Spans downstream tool invocation against the target MCP server.
+
+### 2. Correlation Identifiers
+
+All spans and audit records are bound together by consistent identifiers:
+- `mcp.gateway.call_id`: Unique identifier for each gateway invocation (`call_...`).
+- `mcp.gateway.session_id`: Client session ID correlating multi-turn interactions.
+- `mcp.gateway.session_seq`: Monotonic sequence counter within the session.
+- `mcp.approval.id`: Associated human approval request ID when human-in-the-loop is triggered.
+- `trace_id` & `span_id`: Hex-encoded OpenTelemetry IDs stored in `GatewayInvocationResult` and `ToolCallRecord.metadata`.
+
+### 3. Strict Attribute Allowlist & Privacy Safeguards
+
+To prevent leakage of confidential business data, tokens, and PII into telemetry systems, Phase 8 enforces a strict attribute allowlist (`ALLOWLISTED_SPAN_ATTRIBUTES`) and redaction filter:
+
+- **Forbidden from spans & traces:** Raw tool arguments, raw tool return values, confidential canary strings (`CANARY_SYNTHETIC_ALPHA...`), payment card numbers, SSNs, reviewer approval codes, and unfiltered exception messages.
+- **Permitted attributes:** Metadata keys only (e.g., `mcp.argument_keys = ["file_path"]`), status codes, rule IDs, execution durations, and sanitized outcome identifiers.
+
+### 4. Zero-Policy Authority & Failure Containment
+
+- **Isolation:** Telemetry failures (OTLP exporter timeout, invalid credentials, Langfuse network error) are caught and logged at the operation level. They **never** fail the request, bypass policy checks, alter approval decisions, or hide execution errors.
+- **Langfuse as Optional Observer:** Langfuse is strictly an observer and never a policy authority. If credentials or packages are absent, it silently acts as a no-op without degrading offline operation.
+
+### 5. Local Testing & Configuration
+
+OpenTelemetry is **disabled by default** (`OTEL_ENABLED=false`).
+
+To test deterministically offline without network calls or OTLP collectors, use the in-memory exporter:
+
+```python
+from mcp_agent_gateway.observability import (
+    get_in_memory_exporter,
+    initialize_tracer,
+    reset_tracer_for_testing,
+)
+
+# Configure hermetic in-memory tracer
+initialize_tracer(in_memory=True, force_reinit=True)
+exporter = get_in_memory_exporter()
+
+# Run agent / gateway operations ...
+
+# Inspect finished spans
+spans = exporter.get_finished_spans()
+for span in spans:
+    print(span.name, span.attributes)
+
+# Cleanup
+reset_tracer_for_testing()
+```
+
+Run Phase 8 tests:
+```powershell
+python -m pytest tests/test_phase8_observability.py -v
+```
+
+---
+
 ## Security Guidelines
 
 - **Never commit `.env` or real credentials to version control.**
@@ -512,6 +590,7 @@ asyncio.run(main())
 - Scanners run pre-forwarding on inputs and post-execution on outputs to prevent data leakage.
 - Approvals are single-use, non-transferable, and cryptographically bound to request context.
 - Evaluation reports and SQLite databases are git-ignored to prevent accidental exposure of test traces.
+- Telemetry strictly enforces an attribute allowlist and never transmits raw tool arguments or canary tokens.
 
 ---
 
@@ -525,4 +604,5 @@ asyncio.run(main())
 - **Phase 5:** PII scanning, prompt injection guards, and tool description pinning *(Done)*
 - **Phase 6:** Human approval queue and persistent SQLite audit logging *(Done)*
 - **Phase 7:** Red-team evaluation harness and metrics comparison *(Done)*
-- **Phase 8:** Multi-agent orchestration and management dashboard
+- **Phase 8:** Observability and Tracing (OpenTelemetry spans, Langfuse adapter, privacy allowlists) *(Done)*
+- **Phase 9:** Multi-agent orchestration and management dashboard

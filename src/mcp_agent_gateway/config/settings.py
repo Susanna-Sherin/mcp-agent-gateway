@@ -86,6 +86,34 @@ class Settings(BaseModel):
             "If None, reviewer endpoints fail closed."
         ),
     )
+    otel_enabled: bool = Field(
+        default=False,
+        description="Enable OpenTelemetry distributed tracing.",
+    )
+    otel_service_name: str = Field(
+        default="mcp-agent-gateway",
+        description="Service name for OpenTelemetry resource.",
+    )
+    otel_exporter_otlp_endpoint: str | None = Field(
+        default=None,
+        description="OTLP endpoint for OpenTelemetry trace exporter.",
+    )
+    langfuse_enabled: bool = Field(
+        default=False,
+        description="Enable Langfuse LLM/agent observability.",
+    )
+    langfuse_public_key: str | None = Field(
+        default=None,
+        description="Langfuse public API key.",
+    )
+    langfuse_secret_key: str | None = Field(
+        default=None,
+        description="Langfuse secret API key.",
+    )
+    langfuse_host: str = Field(
+        default="https://cloud.langfuse.com",
+        description="Langfuse host endpoint URL.",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -132,4 +160,11 @@ def get_settings() -> Settings:
         approval_timeout_seconds=approval_timeout,
         audit_retention_days=audit_retention,
         admin_api_key=admin_key,
+        otel_enabled=os.getenv("OTEL_ENABLED", "false").lower() in ("true", "1", "yes"),
+        otel_service_name=os.getenv("OTEL_SERVICE_NAME", "mcp-agent-gateway"),
+        otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        langfuse_enabled=os.getenv("LANGFUSE_ENABLED", "false").lower() in ("true", "1", "yes"),
+        langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+        langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+        langfuse_host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
     )

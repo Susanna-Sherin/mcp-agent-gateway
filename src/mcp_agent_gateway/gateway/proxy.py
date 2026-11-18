@@ -33,6 +33,12 @@ from mcp_agent_gateway.gateway.records import (
     ToolCallRecord,
     generate_timestamp_utc,
 )
+from mcp_agent_gateway.observability import (
+    get_current_trace_and_span_id,
+    get_langfuse_adapter,
+    safe_set_span_attributes,
+    safe_start_span,
+)
 from mcp_agent_gateway.session.models import (
     ChainRuleDecision,
     SessionRoleMismatchError,
@@ -60,6 +66,8 @@ class GatewayInvocationResult:
     chain_decision: dict[str, Any] | None = None
     scanner_results: dict[str, Any] | None = None
     approval_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation for consumer compatibility."""
@@ -77,6 +85,8 @@ class GatewayInvocationResult:
             "chain_decision": self.chain_decision,
             "scanner_results": self.scanner_results,
             "approval_id": self.approval_id,
+            "trace_id": self.trace_id,
+            "span_id": self.span_id,
         }
 
 
@@ -330,18 +340,104 @@ class MCPGatewayProxy:
         caller_role: str | None = None,
         session_id: str | None = None,
     ) -> GatewayInvocationResult:
-        """Invoke a tool through the gateway proxy, intercepting and recording the execution.
-
-        Invocation sequence:
-        1. Resolve and validate the registered tool.
-        2. Resolve or create the trusted session and verify the bound role.
-        3. Evaluate Phase 3 static policy under per-session lock.
-        4. Evaluate chain rules before any MCP subprocess or side effect.
-        5. Forward only when all mandatory checks pass.
-        6. Update successful-call history, relevant taints, and invocation counts.
-        7. Record the final decision and session sequence metadata.
-        """
+        """Invoke a tool through the gateway proxy, intercepting and recording the execution."""
         call_id = f"gw_call_{uuid.uuid4().hex}"
+        meta = dict(metadata or {})
+        role = caller_role or meta.get("caller_role") or self.default_caller_role
+        approval_id: str | None = meta.get("approval_id")
+
+        arg_keys = sorted(list(arguments.keys())) if isinstance(arguments, dict) else []
+        initial_span_attrs = {
+            "mcp.tool.name": tool_name,
+            "mcp.gateway.call_id": call_id,
+            "mcp.gateway.caller_role": role,
+            "mcp.argument_keys": arg_keys,
+        }
+        if session_id:
+            initial_span_attrs["mcp.gateway.session_id"] = session_id
+        if approval_id:
+            initial_span_attrs["mcp.approval.id"] = approval_id
+
+        with safe_start_span("gateway.invoke_tool", attributes=initial_span_attrs) as span:
+            trace_id, span_id = get_current_trace_and_span_id()
+            if trace_id:
+                meta["trace_id"] = trace_id
+                meta["span_id"] = span_id
+
+            res = await self._invoke_tool_impl(
+                tool_name=tool_name,
+                arguments=arguments,
+                metadata=meta,
+                caller_role=caller_role,
+                session_id=session_id,
+                call_id=call_id,
+            )
+
+            reason_code = None
+            if isinstance(res.result, dict):
+                reason_code = res.result.get("reason_code")
+
+            completion_attrs = {
+                "mcp.server.name": res.server_name,
+                "mcp.gateway.outcome": res.outcome,
+                "mcp.gateway.reason_code": reason_code,
+                "mcp.gateway.duration_ms": res.duration_ms,
+            }
+            if res.session_id:
+                completion_attrs["mcp.gateway.session_id"] = res.session_id
+            if res.session_seq is not None:
+                completion_attrs["mcp.gateway.session_seq"] = res.session_seq
+            if res.policy_decision:
+                completion_attrs["mcp.policy.allowed"] = res.policy_decision.get("allowed")
+                completion_attrs["mcp.policy.rule_id"] = res.policy_decision.get("rule_id")
+            if res.chain_decision:
+                completion_attrs["mcp.chain.allowed"] = res.chain_decision.get("allowed")
+                completion_attrs["mcp.chain.reason_code"] = res.chain_decision.get("reason_code")
+            if res.scanner_results:
+                completion_attrs["mcp.scanner.canary_detected"] = res.scanner_results.get(
+                    "canary_leakage_detected", False
+                )
+                completion_attrs["mcp.scanner.pii_detected"] = res.scanner_results.get(
+                    "input_pii_detected", False
+                )
+                completion_attrs["mcp.scanner.injection_detected"] = res.scanner_results.get(
+                    "prompt_injection_detected", False
+                )
+            if res.approval_id:
+                completion_attrs["mcp.approval.id"] = res.approval_id
+
+            safe_set_span_attributes(span, completion_attrs)
+
+            # Optional Langfuse reporting (safe, non-blocking)
+            try:
+                langfuse = get_langfuse_adapter()
+                if langfuse.is_enabled:
+                    langfuse.trace_tool_call(
+                        tool_name=tool_name,
+                        call_id=call_id,
+                        session_id=res.session_id or session_id or "unknown",
+                        outcome=res.outcome,
+                        duration_ms=res.duration_ms,
+                        attributes=completion_attrs,
+                    )
+            except Exception as ex:
+                logger.warning("Telemetry error in Langfuse tool trace: %s", type(ex).__name__)
+
+            res.trace_id = trace_id
+            res.span_id = span_id
+            return res
+
+    async def _invoke_tool_impl(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+        caller_role: str | None = None,
+        session_id: str | None = None,
+        call_id: str | None = None,
+    ) -> GatewayInvocationResult:
+        """Internal execution sequence for tool invocation."""
+        call_id = call_id or f"gw_call_{uuid.uuid4().hex}"
         start_time = time.perf_counter()
         timestamp = generate_timestamp_utc()
         meta = metadata or {}
@@ -1503,7 +1599,27 @@ class MCPGatewayProxy:
                     )
 
             try:
-                result = await self.mcp_client.call_tool(tool_name, arguments)
+                with safe_start_span(
+                    "mcp.tool.execute",
+                    attributes={
+                        "mcp.tool.name": tool_name,
+                        "mcp.server.name": server_name,
+                        "mcp.gateway.call_id": call_id,
+                        "mcp.gateway.session_id": resolved_session_id,
+                    },
+                ) as tool_span:
+                    try:
+                        result = await self.mcp_client.call_tool(tool_name, arguments)
+                        tool_status = (
+                            "error"
+                            if isinstance(result, dict) and result.get("status") == "error"
+                            else "ok"
+                        )
+                        safe_set_span_attributes(tool_span, {"mcp.tool.status": tool_status})
+                    except Exception:
+                        safe_set_span_attributes(tool_span, {"mcp.tool.status": "error"})
+                        raise
+
                 duration_ms = (time.perf_counter() - start_time) * 1000.0
 
                 if isinstance(result, dict) and result.get("status") == "error":
